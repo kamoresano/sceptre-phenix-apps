@@ -286,6 +286,12 @@ class MM(ComponentBase):
                         self.eprint(f'unable to stop pcap capture(s) on vm {vm.hostname}: {ex}')
                         sys.exit(1)
 
+                elif cmd.type == 'start_recording':
+                    # select VM to record from 
+                    # record to: [run-a-<VM_NAME>.fb]
+                elif cmd.type == 'stop_recording':
+                    # os.shell('rfbplay' )
+                    # save as: [run-a-<VM_NAME>.mp4]
 
 def main():
     MM()
