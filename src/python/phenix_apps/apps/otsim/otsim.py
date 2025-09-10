@@ -75,6 +75,15 @@ class OTSim(AppBase):
         elif 'address' in broker:
           return broker['address']
 
+  def __process_scan_rate_metadata(self, md):
+    if 'helics' in md:
+      if 'scan-rate' in md['helics']:
+        return md['helics']['scan-rate']
+      else:
+        return 5
+    else:
+      return None
+    
 
   def __init_defaults(self):
     self.default_infrastructure = self.metadata.get('infrastructure', 'power-distribution')
@@ -91,9 +100,29 @@ class OTSim(AppBase):
       # handle `self.default_endpoint` being set to False
       if self.default_endpoint and '/' not in self.default_endpoint:
         self.default_endpoint = f'{self.default_fed}/{self.default_endpoint}'
+      
+      self.end_time = str(self.metadata['helics'].get('end-time', 36000))
+
     else:
       self.default_fed      = 'OpenDSS'
       self.default_endpoint = 'OpenDSS/updates'
+      self.end_time = str(36000)
+  
+  # Function used to configure all devices that could have node-red as a
+  # metadata tag (fd-client, fep, etc.)
+  def __config_node_red(self, device, config):
+    if 'node-red' in device.metadata:
+      nodered = NodeRed.parse_metadata(device.metadata)
+
+      module = ET.Element('module', {'name': 'node-red'})
+      module.text = 'ot-sim-node-red-module {{config_file}}'
+
+      config.append_to_root(nodered.root)
+      config.append_to_cpu(module)
+
+      inject = nodered.needs_inject()
+      if inject:
+        self.add_inject(hostname=device.hostname, inject=inject)
 
 
   def pre_start(self):
@@ -166,6 +195,9 @@ class OTSim(AppBase):
         broker    = ET.SubElement(io, 'broker-endpoint')
         federate  = ET.SubElement(io, 'federate-name')
         log_level = ET.SubElement(io, 'federate-log-level')
+        end_time  = ET.SubElement(io, 'end-time')
+        
+        end_time.text = self.end_time
 
         if 'helics' in md:
           if 'broker' in md['helics']:
@@ -186,14 +218,15 @@ class OTSim(AppBase):
           else:
             federate.text  = server.hostname
             log_level.text = 'SUMMARY'
+
         else:
           addr = self.__process_helics_broker_metadata(self.metadata)
           assert addr
-
+          
           broker.text    = addr
           federate.text  = server.hostname
           log_level.text = 'SUMMARY'
-
+        
         infrastructure.io_module_xml(io, infra, devices)
 
         config.append_to_root(io)
@@ -215,6 +248,8 @@ class OTSim(AppBase):
 
           config.append_to_root(logic.root)
           config.append_to_cpu(module)
+      
+      self.__config_node_red(server, config)
 
       config_file = f'{self.otsim_dir}/{server.hostname}.xml'
 
@@ -228,9 +263,14 @@ class OTSim(AppBase):
 
     # Preload all the FEPs so they can force downstream FEPs to process their
     # configs during their own processing.
-    for fep in feps:
-      ot_devices[fep.hostname] = FEP(fep)
+    scan_rate_from_md = self.__process_scan_rate_metadata(self.metadata)
 
+    for fep in feps:
+      if scan_rate_from_md is not None: 
+        ot_devices[fep.hostname] = FEP(fep, {"scan-rate": scan_rate_from_md})
+      else: 
+        ot_devices[fep.hostname] = FEP(fep)
+       
     for fep in feps:
       config  = Config(self.metadata)
       injects = config.init_xml_root(fep.metadata)
@@ -251,6 +291,8 @@ class OTSim(AppBase):
 
           config.append_to_root(logic.root)
           config.append_to_cpu(module)
+
+      self.__config_node_red(fep, config)
 
       config_file = f'{self.otsim_dir}/{fep.hostname}.xml'
 
@@ -286,19 +328,8 @@ class OTSim(AppBase):
 
           config.append_to_root(logic.root)
           config.append_to_cpu(module)
-
-      if 'node-red' in client.metadata:
-        nodered = NodeRed.parse_metadata(client.metadata)
-
-        module = ET.Element('module', {'name': 'node-red'})
-        module.text = 'ot-sim-node-red-module {{config_file}}'
-
-        config.append_to_root(nodered.root)
-        config.append_to_cpu(module)
-
-        inject = nodered.needs_inject()
-        if inject:
-          self.add_inject(hostname=client.hostname, inject=inject)
+        
+      self.__config_node_red(client, config)
 
       config_file = f'{self.otsim_dir}/{client.hostname}.xml'
 

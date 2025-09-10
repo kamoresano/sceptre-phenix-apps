@@ -6,6 +6,13 @@ from phenix_apps.apps.scorch import ComponentBase
 from phenix_apps.common import logger, utils
 
 # TODO: bridge capture functionality from mm.py component
+# The issue with bridge captures in phenix is it will capture MGMT traffic,
+# which includes traffic from providers to simulators and bennu field devices.
+# The workaround for this could be to apply a filter with "capture pcap filter"
+# that excludes the IP address ranges used by MGMT and any other undesirable VLANs.
+# To work around issues with multiple experiements, the 'bridge-mode' argument
+# to phenix can be leveraged.
+
 # TODO: pcap file retrieval functionality from mm.py component (this assumes one node)
 # TODO: allow settings per-vm (or per-bridge) that override the "global" setting,
 # e.g. a filter that applies to only one VM. Is this even possible?
@@ -56,7 +63,7 @@ class PCAP(ComponentBase):
             self.print(f"applying pcap snaplen: {snaplen}")
             self.mm.capture_pcap_snaplen(snaplen)
 
-        # TODO: bridge
+        # TODO: bridge (note: this is implemented in mm.py component)
         # bridge_path = Path(self.base_dir, "phenix.pcap")
         # self.mm.mesh_send('all', f'shell mkdir -p {self.base_dir}')
         # self.mm.capture_pcap_bridge("phenix", str(bridge_path))
@@ -66,7 +73,7 @@ class PCAP(ComponentBase):
             hostname, interface = self.get_host_and_iface(vm)
             filepath = Path(self.base_dir, f"{hostname}-{interface}.pcap")
 
-            self.print(f"starting PCAP capture on interface {interface} for VM {hostname} to file {filepath} ({i+1} of {len(self.metadata.vms)})")
+            self.print(f"starting capture on '{hostname}' interface '{interface}' to '{filepath}' ({i+1} of {len(self.metadata.vms)})")
             self.mm.capture_pcap_vm(hostname, interface, str(filepath))
 
         logger.log("INFO", f"Started user component: {self.name}")
@@ -75,9 +82,6 @@ class PCAP(ComponentBase):
         logger.log("INFO", f"Stopping user component: {self.name}")
 
         pcap_paths = []
-
-        # TODO: bridge
-        # self.mm.capture_pcap_bridge
 
         self.print(f"stopping captures for {len(self.metadata.vms)} VMs")
         for i, vm in enumerate(self.metadata.vms):
@@ -132,9 +136,18 @@ class PCAP(ComponentBase):
                 new_path = Path(pcap_path.parent, "raw", pcap_path.name)
                 pcap_path.rename(new_path)
                 new_paths.append(new_path)
-            pcap_paths = new_paths
 
+            pcap_paths = new_paths
             pcap_paths.append(merged_path)
+
+            if self.metadata.get("dedupe", True):
+                self.print(f"Removing duplicates from '{merged_path.name}'")
+                dd_path = Path(self.base_dir, "deduped.pcap")
+                utils.run_command(f"editcap -d {merged_path} {dd_path}")
+                dd_path.rename(merged_path)  # overwrite merged.pcap with deduped.pcap
+            else:
+                self.print(f"NOT removing duplicates from '{merged_path.name}' (dedupe=false)")
+
             pcap_metadata[merged_path.name] = utils.pcap_capinfos(merged_path)
 
         # Save metadata to JSON file

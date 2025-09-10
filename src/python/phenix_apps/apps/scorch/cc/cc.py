@@ -1,4 +1,7 @@
-import os, subprocess, sys, uuid
+import os
+import subprocess
+import sys
+import uuid
 
 from phenix_apps.apps.scorch import ComponentBase
 from phenix_apps.common import utils
@@ -10,28 +13,29 @@ class CC(ComponentBase):
 
         self.execute_stage()
 
-
     def configure(self):
         self.__run('configure')
-
 
     def start(self):
         self.__run('start')
 
-
     def stop(self):
         self.__run('stop')
-
 
     def cleanup(self):
         self.__run('cleanup')
 
-
-    def __run(self, stage):
+    def __run(self, stage: str) -> None:
         nodes = self.extract_node_names()
-        vms   = self.metadata.get('vms', [])
+        vms = self.metadata.get('vms', [])
+        commands = self.metadata.get(stage, [])
 
-        mm = self.mm_init()
+        for cmd in commands:
+            if cmd.type == 'reset':
+                self.__reset_cc()
+            else:
+                self.eprint(f"Unknown command type '{cmd.type}' for stage '{stage}'")
+                sys.exit(1)
 
         for vm in vms:
             if vm.hostname not in nodes:
@@ -55,10 +59,10 @@ class CC(ComponentBase):
 
                     self.print(f"executing command '{cmd.args}' in VM {vm.hostname}")
 
-                    script = self.__send_cmd_as_file(mm, vm.hostname, cmd.args)
+                    script = self.__send_cmd_as_file(vm.hostname, cmd.args)
 
                     if wait:
-                        results = utils.mm_exec_wait(mm, vm.hostname, script, once=once)
+                        results = utils.mm_exec_wait(self.mm, vm.hostname, script, once=once)
 
                         self.print(f"command '{cmd.args}' executed in VM {vm.hostname} using cc")
 
@@ -108,12 +112,12 @@ class CC(ComponentBase):
                             else:
                                 self.print('results are valid')
                     else:
-                        mm.cc_filter(f'name={vm.hostname}')
+                        self.mm.cc_filter(f'name={vm.hostname}')
 
                         if once:
-                            mm.cc_exec_once(script)
+                            self.mm.cc_exec_once(script)
                         else:
-                            mm.cc_exec(script)
+                            self.mm.cc_exec(script)
 
                         self.print(f"command '{cmd.args}' executed in VM {vm.hostname} using cc")
                 elif cmd.type == 'background':
@@ -121,15 +125,16 @@ class CC(ComponentBase):
 
                     self.print(f"backgrounding command '{cmd.args}' in VM {vm.hostname} using cc")
 
-                    script = self.__send_cmd_as_file(mm, vm.hostname, cmd.args)
+                    script = self.__send_cmd_as_file(vm.hostname, cmd.args)
 
-                    mm.cc_filter(f'name={vm.hostname}')
+                    self.mm.cc_filter(f'name={vm.hostname}')
 
                     if once:
-                        mm.cc_background_once(script)
+                        self.mm.cc_background_once(script)
                     else:
-                        mm.cc_background(script)
+                        self.mm.cc_background(script)
 
+                    self.mm.clear_cc_filter()
                     self.print(f"command '{cmd.args}' backgrounded in VM {vm.hostname}")
                 elif cmd.type == 'send':
                     args = cmd.args.split(':')
@@ -154,7 +159,7 @@ class CC(ComponentBase):
                     self.print(f"sending file '{src}' to VM {vm.hostname} at '{dst}' using cc")
 
                     try:
-                        utils.mm_send(mm, vm.hostname, src, dst)
+                        utils.mm_send(self.mm, vm.hostname, src, dst)
                         self.print(f"file '{src}' sent to VM {vm.hostname} at '{dst}'")
                     except Exception as ex:
                         self.eprint(f"error sending '{src}' to VM {vm.hostname}: {ex}")
@@ -177,14 +182,18 @@ class CC(ComponentBase):
                     self.print(f"receiving file '{src}' from VM {vm.hostname} to `{dst}` using cc")
 
                     try:
-                        utils.mm_recv(mm, vm.hostname, src, dst)
+                        utils.mm_recv(self.mm, vm.hostname, src, dst)
                         self.print(f"file '{src}' received from VM {vm.hostname} to `{dst}`")
                     except Exception as ex:
                         self.eprint(f"error receiving '{src}' from VM {vm.hostname}: {ex}")
                         sys.exit(1)
+                elif cmd.type == 'reset':
+                    self.__reset_cc()
+                else:
+                    self.eprint(f"Unknown command type '{cmd.type}' for VM '{vm.hostname}' and stage '{stage}'")
+                    sys.exit(1)
 
-
-    def __send_cmd_as_file(self, mm, hostname, cmd):
+    def __send_cmd_as_file(self, hostname, cmd):
         cmd_file = f'run-{self.extract_run_name()}_{str(uuid.uuid4())}'
         node     = self.extract_node(hostname)
 
@@ -199,12 +208,13 @@ class CC(ComponentBase):
         with open(cmd_src, 'w') as f:
             f.write(cmd)
 
-        mm.cc_filter(f'name={hostname}')
-        mm.cc_send(cmd_src)
+        self.mm.cc_filter(f'name={hostname}')
+        self.mm.cc_send(cmd_src)
 
         # wait for file to be sent via cc
-        last_cmd = utils.mm_last_command(mm)
-        utils.mm_wait_for_cmd(mm, last_cmd['id'])
+        last_cmd = utils.mm_last_command(self.mm)
+        utils.mm_wait_for_cmd(self.mm, last_cmd['id'])
+        self.mm.clear_cc_filter()
 
         os.remove(cmd_src)
 
@@ -212,6 +222,20 @@ class CC(ComponentBase):
             return f'powershell.exe -ExecutionPolicy Bypass -File {cmd_dst}'
         else:
             return f'bash {cmd_dst}'
+
+    def __reset_cc(self):
+        self.print("deleting miniccc commands and responses")
+        self.mm.clear_cc_filter()
+        self.mm.cc_delete_command("all")
+        self.mm.cc_delete_response("all")
+        self.mm.clear_cc_commands()
+        self.mm.clear_cc_responses()
+
+        # ensure miniccc_responses directory is empty
+        miniccc_dir = utils.mm_get_cc_path(self.mm)
+        if miniccc_dir and any(p.exists() for p in miniccc_dir.iterdir()):
+            self.eprint(f"WARNING: miniccc responses still exist in '{miniccc_dir}' even after clearing! number remaining: {len(list(miniccc_dir.iterdir()))}")
+            # sys.exit(1)
 
 
 def main():
